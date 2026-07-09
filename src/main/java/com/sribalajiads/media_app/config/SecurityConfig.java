@@ -41,7 +41,6 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/**", "/uploads/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/media/generate-ppt", "/api/media/generate-ppt-bulk", "/api/media/generate-pdf", "/api/media/generate-pdf-bulk").authenticated()
                         .requestMatchers(HttpMethod.GET, "/api/media/**").authenticated()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
@@ -80,8 +79,4 @@ public class SecurityConfig {
         return new BCryptPasswordEncoder();
     }
 
-    @Bean
-    public WebSecurityCustomizer webSecurityCustomizer() {
-        return (web) -> web.ignoring().requestMatchers("/uploads/**");
-    }
 }
