@@ -37,35 +37,36 @@ public class SecurityConfig {
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+
         http
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(AbstractHttpConfigurer::disable)
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+
                 .authorizeHttpRequests(auth -> auth
 
-                        // Allow CORS preflight
+                        // Allow preflight
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                        // Public authentication APIs
+                        // Public endpoints
                         .requestMatchers("/api/auth/**").permitAll()
 
-                        // Protected Media APIs
-                        .requestMatchers(HttpMethod.GET, "/api/media/**").authenticated()
-                        .requestMatchers(HttpMethod.POST,
-                                "/api/media/generate-ppt",
-                                "/api/media/generate-ppt-bulk",
-                                "/api/media/generate-pdf",
-                                "/api/media/generate-pdf-bulk")
-                        .authenticated()
+                        // Static resources
+                        .requestMatchers("/uploads/**").permitAll()
 
-                        // Admin APIs
+                        // Admin
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
-                        .requestMatchers(HttpMethod.POST, "/api/media").hasRole("ADMIN")
+
+                        // Media
+                        .requestMatchers(HttpMethod.GET, "/api/media/**").authenticated()
+                        .requestMatchers(HttpMethod.POST, "/api/media/**").authenticated()
                         .requestMatchers(HttpMethod.PUT, "/api/media/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/media/**").hasRole("ADMIN")
 
                         .anyRequest().authenticated()
                 )
-                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
