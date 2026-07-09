@@ -5,6 +5,8 @@ import com.sribalajiads.media_app.exception.ResourceNotFoundException;
 import com.sribalajiads.media_app.model.Company;
 import com.sribalajiads.media_app.model.Media;
 import com.sribalajiads.media_app.repository.MediaRepository;
+import com.sribalajiads.media_app.storage.ImageStorageService;
+import com.sribalajiads.media_app.storage.UploadResult;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -28,17 +30,18 @@ import java.util.zip.ZipInputStream;
 public class MediaService {
 
     private final MediaRepository mediaRepository;
-    private final FileStorageService fileStorageService;
+    private final ImageStorageService imageStorageService; // replaces FileStorageService
     private final PptGenerationService pptGenerationService;
     private final PdfGenerationService pdfGenerationService;
 
     private static final Set<String> ALLOWED_IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "webp");
 
+
     @Autowired
-    public MediaService(MediaRepository mediaRepository, FileStorageService fileStorageService,
+    public MediaService(MediaRepository mediaRepository, ImageStorageService imageStorageService,
                         PptGenerationService pptGenerationService, PdfGenerationService pdfGenerationService) {
         this.mediaRepository = mediaRepository;
-        this.fileStorageService = fileStorageService;
+        this.imageStorageService = imageStorageService;
         this.pptGenerationService = pptGenerationService;
         this.pdfGenerationService = pdfGenerationService;
     }
@@ -46,7 +49,7 @@ public class MediaService {
     @Transactional
     public Media createMedia(String belongsTo, String mediaCode, String location, String city, String specifications, String illumination, String mediaType, MultipartFile imageFile, String trafficView, String locationUrl, String coordinates) {
 
-        String imageFilename = fileStorageService.store(imageFile, mediaCode);
+        UploadResult uploadResult = imageStorageService.upload(imageFile, mediaCode);
 
         Media newMedia = new Media();
         newMedia.setBelongsTo(Company.valueOf(belongsTo.toUpperCase()));
@@ -57,7 +60,10 @@ public class MediaService {
         newMedia.setSpecifications(specifications);
         newMedia.setIllumination(illumination);
         newMedia.setMediaType(mediaType);
-        newMedia.setImagePath(imageFilename);
+        newMedia.setImageUrl(uploadResult.getImageUrl());
+        newMedia.setPublicId(uploadResult.getPublicId());
+        newMedia.setStorageProvider(uploadResult.getProvider());
+        newMedia.setImagePath(uploadResult.getPublicId()); // backward compat
         newMedia.setLocationUrl(locationUrl);
         newMedia.setCoordinates(coordinates);
 
@@ -138,20 +144,24 @@ public class MediaService {
         Media mediaToUpdate = mediaRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Media not found with id: " + id));
 
-        String oldMediaCode = mediaToUpdate.getMediaCode();
-        String oldImagePath = mediaToUpdate.getImagePath();
-        String newImagePath = oldImagePath;
-        boolean mediaCodeChanged = !mediaCode.equals(oldMediaCode);
+        String oldPublicId = mediaToUpdate.getPublicId();
+        boolean mediaCodeChanged = !mediaCode.equals(mediaToUpdate.getMediaCode());
 
         if (imageFile != null && !imageFile.isEmpty()) {
-            newImagePath = fileStorageService.store(imageFile, mediaCode);
-            if (mediaCodeChanged && oldImagePath != null && !oldImagePath.isBlank()) {
-                fileStorageService.delete(oldImagePath);
+            UploadResult result = imageStorageService.upload(imageFile, mediaCode);
+            if (mediaCodeChanged && oldPublicId != null && !oldPublicId.equals(result.getPublicId())) {
+                imageStorageService.delete(oldPublicId);
             }
-        } else if (mediaCodeChanged) {
-            if (oldImagePath != null && !oldImagePath.isBlank()) {
-                newImagePath = fileStorageService.rename(oldImagePath, mediaCode);
-            }
+            mediaToUpdate.setImageUrl(result.getImageUrl());
+            mediaToUpdate.setPublicId(result.getPublicId());
+            mediaToUpdate.setStorageProvider(result.getProvider());
+            mediaToUpdate.setImagePath(result.getPublicId());
+        } else if (mediaCodeChanged && oldPublicId != null && !oldPublicId.isBlank()) {
+            UploadResult result = imageStorageService.rename(oldPublicId, mediaCode);
+            mediaToUpdate.setImageUrl(result.getImageUrl());
+            mediaToUpdate.setPublicId(result.getPublicId());
+            mediaToUpdate.setStorageProvider(result.getProvider());
+            mediaToUpdate.setImagePath(result.getPublicId());
         }
 
         mediaToUpdate.setBelongsTo(Company.valueOf(belongsTo.toUpperCase()));
@@ -202,8 +212,8 @@ public class MediaService {
     public void deleteMedia(Long id) {
         Media media = mediaRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Media not found with id: " + id));
-        if (media.getImagePath() != null && !media.getImagePath().isBlank()) {
-            fileStorageService.delete(media.getImagePath());
+        if (media.getPublicId() != null && !media.getPublicId().isBlank()) {
+            imageStorageService.delete(media.getPublicId());
         }
         mediaRepository.deleteById(id);
     }
@@ -266,15 +276,17 @@ public class MediaService {
                         }
                         byte[] imageBytes = baos.toByteArray();
 
-                        // Delete old file if exists
-                        String oldImagePath = matchedMedia.getImagePath();
-                        if (oldImagePath != null && !oldImagePath.isBlank()) {
-                            fileStorageService.delete(oldImagePath);
+                        String oldPublicId = matchedMedia.getPublicId();
+                        UploadResult uploadResult = imageStorageService.upload(imageBytes, matchedMedia.getMediaCode(), extension);
+
+                        if (oldPublicId != null && !oldPublicId.equals(uploadResult.getPublicId())) {
+                            imageStorageService.delete(oldPublicId);
                         }
 
-                        // Store new file using byte[] overload
-                        String newFilename = fileStorageService.store(imageBytes, matchedMedia.getMediaCode(), extension);
-                        matchedMedia.setImagePath(newFilename);
+                        matchedMedia.setImageUrl(uploadResult.getImageUrl());
+                        matchedMedia.setPublicId(uploadResult.getPublicId());
+                        matchedMedia.setStorageProvider(uploadResult.getProvider());
+                        matchedMedia.setImagePath(uploadResult.getPublicId());
                         mediaRepository.save(matchedMedia);
 
                         result.getMatched().add(matchedMedia.getMediaCode());

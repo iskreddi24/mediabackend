@@ -1,12 +1,11 @@
 package com.sribalajiads.media_app.service;
 
 import com.sribalajiads.media_app.model.Media;
+import com.sribalajiads.media_app.storage.ImageStorageService;
 import org.apache.poi.sl.usermodel.PictureData;
 import org.apache.poi.sl.usermodel.TextParagraph;
 import org.apache.poi.sl.usermodel.VerticalAlignment;
-import org.apache.poi.util.IOUtils;
 import org.apache.poi.xslf.usermodel.*;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -14,20 +13,16 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
-import java.io.*;
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.List;
 
 @Service
 public class PptGenerationService {
 
-    @Value("${file.upload-dir}")
-    private String uploadDir;
-
     private static final String NO_LOGO_OPTION = "NO_LOGO";
+    private static final String FOLDER = "media_app";
 
     private static final int SLIDE_WIDTH = 960;
     private static final int SLIDE_HEIGHT = 540;
@@ -50,6 +45,12 @@ public class PptGenerationService {
     private static final double FOOTER_Y = 490;
     private static final double FOOTER_H = 40;
 
+    private final ImageStorageService imageStorageService;
+
+    public PptGenerationService(ImageStorageService imageStorageService) {
+        this.imageStorageService = imageStorageService;
+    }
+
     public ByteArrayInputStream generatePpt(List<Media> mediaList, String companyName) throws IOException {
 
         try (XMLSlideShow ppt = new XMLSlideShow()) {
@@ -66,8 +67,8 @@ public class PptGenerationService {
 
                 if (!isNoLogo) {
                     String mediaOwner = media.getBelongsTo().name();
-                    File logoFile = findFileByBaseName(uploadDir, mediaOwner + "LOGO");
-                    addImageToSlide(ppt, slide, logoFile, LOGO_X, LOGO_Y, LOGO_MAX_W, LOGO_MAX_H, "Logo Not Available");
+                    byte[] logoBytes = safeDownload(FOLDER + "/" + mediaOwner + "_LOGO");
+                    addImageToSlide(ppt, slide, logoBytes, LOGO_X, LOGO_Y, LOGO_MAX_W, LOGO_MAX_H, "Logo Not Available");
                 }
 
                 XSLFTextBox locBox = slide.createTextBox();
@@ -80,10 +81,8 @@ public class PptGenerationService {
                 locRun.setFontSize(14.0);
                 locRun.setBold(true);
 
-                String dbFilename = media.getImagePath();
-                String baseName = getBaseName(dbFilename);
-                File imageFile = findFileByBaseName(uploadDir, baseName);
-                addImageToSlide(ppt, slide, imageFile, MAIN_IMG_X, MAIN_IMG_Y, MAIN_IMG_W, MAIN_IMG_H, "Image Not Found");
+                byte[] mainImgBytes = safeDownloadFromUrl(media.getImageUrl());
+                addImageToSlide(ppt, slide, mainImgBytes, MAIN_IMG_X, MAIN_IMG_Y, MAIN_IMG_W, MAIN_IMG_H, "Image Not Found");
 
                 XSLFTextBox detailsBox = slide.createTextBox();
                 detailsBox.setAnchor(new Rectangle2D.Double(20, FOOTER_Y, SLIDE_WIDTH * 0.75, FOOTER_H));
@@ -132,18 +131,39 @@ public class PptGenerationService {
         }
     }
 
-    private void addImageToSlide(XMLSlideShow ppt, XSLFSlide slide, File imageFile, double x, double y, double w, double h, String errorMsg) {
-        if (imageFile != null && imageFile.exists()) {
+    // ============================================================
+    // Cloud download helpers
+    // ============================================================
+
+    private byte[] safeDownload(String publicId) {
+        try {
+            return imageStorageService.download(publicId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private byte[] safeDownloadFromUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        try {
+            return imageStorageService.downloadFromUrl(url);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ============================================================
+    // Slide drawing
+    // ============================================================
+
+    private void addImageToSlide(XMLSlideShow ppt, XSLFSlide slide, byte[] imgBytes, double x, double y, double w, double h, String errorMsg) {
+        if (imgBytes != null && imgBytes.length > 0) {
             try {
-                byte[] imgBytes = convertToImageBytes(imageFile);
-                if (imgBytes != null && imgBytes.length > 0) {
-                    PictureData.PictureType type = getPictureType(imageFile.getName());
-                    PictureData pd = ppt.addPicture(imgBytes, type);
-                    XSLFPictureShape pic = slide.createPicture(pd);
-                    resizePictureToFit(pic, w, h, x, y);
-                } else {
-                    drawErrorPlaceholder(slide, errorMsg + " (Empty)", x, y, w, h);
-                }
+                byte[] normalized = normalizeToPngOrJpeg(imgBytes);
+                PictureData.PictureType type = detectPictureType(normalized);
+                PictureData pd = ppt.addPicture(normalized, type);
+                XSLFPictureShape pic = slide.createPicture(pd);
+                resizePictureToFit(pic, w, h, x, y);
             } catch (Exception e) {
                 e.printStackTrace();
                 drawErrorPlaceholder(slide, errorMsg + " (Error)", x, y, w, h);
@@ -154,70 +174,62 @@ public class PptGenerationService {
     }
 
     private void addFullScreenSlide(XMLSlideShow ppt, String baseFileName) {
-        File imageFile = findFileByBaseName(uploadDir, baseFileName);
-        if (imageFile != null && imageFile.exists()) {
-            try {
-                XSLFSlide slide = ppt.createSlide();
-                byte[] imgBytes = convertToImageBytes(imageFile);
-                PictureData.PictureType type = getPictureType(imageFile.getName());
-                PictureData pd = ppt.addPicture(imgBytes, type);
-                XSLFPictureShape pic = slide.createPicture(pd);
-                pic.setAnchor(new Rectangle2D.Double(0, 0, SLIDE_WIDTH, SLIDE_HEIGHT));
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
+        byte[] imgBytes = safeDownload(FOLDER + "/" + baseFileName);
+        if (imgBytes == null || imgBytes.length == 0) return;
 
-    private File findFileByBaseName(String dirPath, String baseName) {
-        Path dir = Paths.get(dirPath);
-        if (!Files.exists(dir) || !Files.isDirectory(dir)) return null;
-        String cleanedBaseName = baseName.trim();
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, cleanedBaseName + ".*")) {
-            for (Path entry : stream) {
-                return entry.toFile();
-            }
-        } catch (IOException e) {
+        try {
+            XSLFSlide slide = ppt.createSlide();
+            byte[] normalized = normalizeToPngOrJpeg(imgBytes);
+            PictureData.PictureType type = detectPictureType(normalized);
+            PictureData pd = ppt.addPicture(normalized, type);
+            XSLFPictureShape pic = slide.createPicture(pd);
+            pic.setAnchor(new Rectangle2D.Double(0, 0, SLIDE_WIDTH, SLIDE_HEIGHT));
+        } catch (Exception e) {
             e.printStackTrace();
         }
-        return null;
     }
 
-    private byte[] convertToImageBytes(File file) throws IOException {
-        String extension = getFileExtension(file.getName()).toLowerCase();
-        if ("webp".equals(extension)) {
-            try (InputStream is = new FileInputStream(file)) {
-                BufferedImage image = ImageIO.read(is);
-                if (image == null) throw new IOException("Cannot read WebP");
-                try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                    ImageIO.write(image, "png", baos);
-                    return baos.toByteArray();
-                }
+    // ============================================================
+    // Image byte helpers
+    // ============================================================
+
+    /**
+     * POI's XSLFPictureShape only reliably supports PNG/JPEG. If Cloudinary
+     * ever hands back webp/other bytes, decode + re-encode as PNG.
+     */
+    private byte[] normalizeToPngOrJpeg(byte[] bytes) throws IOException {
+        if (isPng(bytes) || isJpeg(bytes)) {
+            return bytes;
+        }
+        try (ByteArrayInputStream bis = new ByteArrayInputStream(bytes)) {
+            BufferedImage image = ImageIO.read(bis);
+            if (image == null) {
+                throw new IOException("Unsupported image format for slide picture");
             }
-        } else {
-            try (InputStream is = new FileInputStream(file)) {
-                return IOUtils.toByteArray(is);
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                ImageIO.write(image, "png", baos);
+                return baos.toByteArray();
             }
         }
     }
 
-    private PictureData.PictureType getPictureType(String fileName) {
-        String ext = getFileExtension(fileName).toLowerCase();
-        if (ext.equals("png") || ext.equals("webp")) return PictureData.PictureType.PNG;
-        return PictureData.PictureType.JPEG;
+    private PictureData.PictureType detectPictureType(byte[] bytes) {
+        return isPng(bytes) ? PictureData.PictureType.PNG : PictureData.PictureType.JPEG;
     }
 
-    private String getFileExtension(String fileName) {
-        if (fileName == null) return "";
-        int dotIndex = fileName.lastIndexOf('.');
-        return (dotIndex == -1) ? "" : fileName.substring(dotIndex + 1);
+    private boolean isPng(byte[] b) {
+        return b != null && b.length > 8
+                && (b[0] & 0xFF) == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G';
     }
 
-    private String getBaseName(String fileName) {
-        if (fileName == null) return "";
-        int dotIndex = fileName.lastIndexOf('.');
-        return (dotIndex == -1) ? fileName : fileName.substring(0, dotIndex);
+    private boolean isJpeg(byte[] b) {
+        return b != null && b.length > 3
+                && (b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8;
     }
+
+    // ============================================================
+    // Layout helpers
+    // ============================================================
 
     private void resizePictureToFit(XSLFPictureShape shape, double boxW, double boxH, double x, double y) {
         Dimension dim = shape.getPictureData().getImageDimension();

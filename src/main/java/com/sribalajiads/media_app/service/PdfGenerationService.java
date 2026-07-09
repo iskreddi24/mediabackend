@@ -1,38 +1,35 @@
 package com.sribalajiads.media_app.service;
 
 import com.sribalajiads.media_app.model.Media;
+import com.sribalajiads.media_app.storage.ImageStorageService;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
-import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
-import org.springframework.beans.factory.annotation.Value;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
 import java.awt.Color;
 import java.awt.image.BufferedImage;
-import java.io.*;
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.List;
 
 @Service
 public class PdfGenerationService {
 
-    @Value("${file.upload-dir}")
-    private String uploadDir;
-
     private static final String NO_LOGO_OPTION = "NO_LOGO";
+    private static final String FOLDER = "media_app";
 
-    // --- LAYOUT CONSTANTS (Widescreen 16:9 Page: 792 x 612 points = 11" x 8.5") ---
+    // --- LAYOUT CONSTANTS (Widescreen 16:9 Page: 792 x 540 points) ---
     private static final float PAGE_WIDTH = 792;
     private static final float PAGE_HEIGHT = 540;
 
-    // Layout Coordinates
     private static final float LOGO_X = 20;
     private static final float LOGO_Y = PAGE_HEIGHT - 70;
     private static final float LOGO_MAX_W = 180;
@@ -50,6 +47,12 @@ public class PdfGenerationService {
 
     private static final float FOOTER_Y = 20;
     private static final float FOOTER_H = 40;
+
+    private final ImageStorageService imageStorageService;
+
+    public PdfGenerationService(ImageStorageService imageStorageService) {
+        this.imageStorageService = imageStorageService;
+    }
 
     public ByteArrayInputStream generatePdf(List<Media> mediaList, String companyName) throws IOException {
 
@@ -75,8 +78,8 @@ public class PdfGenerationService {
                     // --- A. COMPANY LOGO ---
                     if (!isNoLogo) {
                         String mediaOwner = media.getBelongsTo().name();
-                        File logoFile = findFileByBaseName(uploadDir, mediaOwner + "LOGO");
-                        drawImage(document, cs, logoFile, LOGO_X, LOGO_Y, LOGO_MAX_W, LOGO_MAX_H);
+                        byte[] logoBytes = safeDownload(FOLDER + "/" + mediaOwner + "_LOGO");
+                        drawImage(document, cs, logoBytes, LOGO_X, LOGO_Y, LOGO_MAX_W, LOGO_MAX_H);
                     }
 
                     // --- B. LOCATION TEXT ---
@@ -89,11 +92,9 @@ public class PdfGenerationService {
                     cs.showText(locationText);
                     cs.endText();
 
-                    // --- C. MAIN MEDIA IMAGE (SMART LOOKUP) ---
-                    String dbFilename = media.getImagePath();
-                    String baseName = getBaseName(dbFilename);
-                    File imageFile = findFileByBaseName(uploadDir, baseName);
-                    drawImage(document, cs, imageFile, MAIN_IMG_X, MAIN_IMG_Y, MAIN_IMG_W, MAIN_IMG_H);
+                    // --- C. MAIN MEDIA IMAGE ---
+                    byte[] mainImgBytes = safeDownloadFromUrl(media.getImageUrl());
+                    drawImage(document, cs, mainImgBytes, MAIN_IMG_X, MAIN_IMG_Y, MAIN_IMG_W, MAIN_IMG_H);
 
                     // --- D. DETAILS ---
                     StringBuilder details = new StringBuilder();
@@ -120,15 +121,17 @@ public class PdfGenerationService {
                         cs.beginText();
                         cs.setFont(PDType1Font.HELVETICA_BOLD, 12);
                         cs.setNonStrokingColor(Color.BLUE);
-                        String linkText = "\uD83D\uDDFA Street View";
+
+                        String linkText = "Street View";
                         float linkWidth = PDType1Font.HELVETICA_BOLD.getStringWidth(linkText) / 1000 * 12;
+
                         cs.newLineAtOffset(PAGE_WIDTH - 20 - linkWidth, FOOTER_Y + 10);
                         cs.showText(linkText);
                         cs.endText();
                     }
 
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    throw new IOException("Failed to generate PDF", e);
                 }
             }
 
@@ -146,103 +149,117 @@ public class PdfGenerationService {
         }
     }
 
+    // ============================================================
+    // Cloud download helpers
+    // ============================================================
+
+    private byte[] safeDownload(String publicId) {
+        try {
+            return imageStorageService.download(publicId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private byte[] safeDownloadFromUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        try {
+            return imageStorageService.downloadFromUrl(url);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ============================================================
+    // Page drawing
+    // ============================================================
+
     private void addFullScreenPage(PDDocument document, String baseFileName) {
-        File imageFile = findFileByBaseName(uploadDir, baseFileName);
-        if (imageFile != null && imageFile.exists()) {
-            try {
-                PDPage page = new PDPage(new PDRectangle(PAGE_WIDTH, PAGE_HEIGHT));
-                document.addPage(page);
-                try (PDPageContentStream cs = new PDPageContentStream(document, page)) {
-                    drawImage(document, cs, imageFile, 0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
+        byte[] imgBytes = safeDownload(FOLDER + "/" + baseFileName);
+        if (imgBytes == null || imgBytes.length == 0) return;
+
+        try {
+            PDPage page = new PDPage(new PDRectangle(PAGE_WIDTH, PAGE_HEIGHT));
+            document.addPage(page);
+            try (PDPageContentStream cs = new PDPageContentStream(document, page)) {
+                drawImage(document, cs, imgBytes, 0, 0, PAGE_WIDTH, PAGE_HEIGHT);
             }
-        }
-    }
-
-    private void drawImage(PDDocument document, PDPageContentStream cs, File imageFile,
-                           float x, float y, float boxW, float boxH) {
-        if (imageFile != null && imageFile.exists()) {
-            try {
-                byte[] imgBytes = convertToImageBytes(imageFile);
-                if (imgBytes != null && imgBytes.length > 0) {
-                    // Write to temp file since PDImageXObject needs a file or input stream
-                    java.io.File tempFile = java.io.File.createTempFile("pdfbox_", ".png");
-                    try {
-                        java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile);
-                        fos.write(imgBytes);
-                        fos.close();
-
-                        PDImageXObject pdImage = PDImageXObject.createFromFile(tempFile.getAbsolutePath(), document);
-
-                        // Calculate aspect-ratio-preserving dimensions
-                        float imgW = pdImage.getWidth();
-                        float imgH = pdImage.getHeight();
-                        float ratio = imgW / imgH;
-                        float newW = boxW;
-                        float newH = newW / ratio;
-                        if (newH > boxH) {
-                            newH = boxH;
-                            newW = newH * ratio;
-                        }
-                        // Center in the box
-                        float offsetX = x + (boxW - newW) / 2;
-                        // PDF coordinates: y=0 is bottom, so we need to calculate from bottom
-                        float offsetY = y + (boxH - newH) / 2;
-
-                        cs.drawImage(pdImage, offsetX, offsetY, newW, newH);
-                    } finally {
-                        tempFile.delete();
-                    }
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    private File findFileByBaseName(String dirPath, String baseName) {
-        Path dir = Paths.get(dirPath);
-        if (!Files.exists(dir) || !Files.isDirectory(dir)) return null;
-        String cleanedBaseName = baseName.trim();
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, cleanedBaseName + ".*")) {
-            for (Path entry : stream) {
-                return entry.toFile();
-            }
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
-        return null;
     }
 
-    private byte[] convertToImageBytes(File file) throws IOException {
-        String extension = getFileExtension(file.getName()).toLowerCase();
-        if ("webp".equals(extension)) {
-            try (InputStream is = new FileInputStream(file)) {
-                BufferedImage image = ImageIO.read(is);
-                if (image == null) throw new IOException("Cannot read WebP");
-                try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                    ImageIO.write(image, "png", baos);
-                    return baos.toByteArray();
-                }
+    private void drawImage(PDDocument document, PDPageContentStream cs, byte[] imgBytes,
+                           float x, float y, float boxW, float boxH) {
+        if (imgBytes == null || imgBytes.length == 0) return;
+
+        File tempFile = null;
+        try {
+            byte[] normalized = normalizeToPng(imgBytes);
+
+            tempFile = File.createTempFile("pdfbox_", ".png");
+            try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                fos.write(normalized);
             }
-        } else {
-            try (InputStream is = new FileInputStream(file)) {
-                return is.readAllBytes();
+
+            PDImageXObject pdImage = PDImageXObject.createFromFile(tempFile.getAbsolutePath(), document);
+
+            // Calculate aspect-ratio-preserving dimensions
+            float imgW = pdImage.getWidth();
+            float imgH = pdImage.getHeight();
+            float ratio = imgW / imgH;
+            float newW = boxW;
+            float newH = newW / ratio;
+            if (newH > boxH) {
+                newH = boxH;
+                newW = newH * ratio;
+            }
+            // Center in the box
+            float offsetX = x + (boxW - newW) / 2;
+            float offsetY = y + (boxH - newH) / 2;
+
+            cs.drawImage(pdImage, offsetX, offsetY, newW, newH);
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (tempFile != null) {
+                tempFile.delete();
             }
         }
     }
 
-    private String getFileExtension(String fileName) {
-        if (fileName == null) return "";
-        int dotIndex = fileName.lastIndexOf('.');
-        return (dotIndex == -1) ? "" : fileName.substring(dotIndex + 1);
+    // ============================================================
+    // Image byte helpers
+    // ============================================================
+
+    /**
+     * PDImageXObject.createFromFile() needs PDFBox's JPEG/PNG/TIFF-capable
+     * readers to recognize the format. Re-encode anything else (e.g. webp)
+     * to PNG so it always loads cleanly.
+     */
+    private byte[] normalizeToPng(byte[] bytes) throws IOException {
+        if (isPng(bytes) || isJpeg(bytes)) {
+            return bytes;
+        }
+        try (ByteArrayInputStream bis = new ByteArrayInputStream(bytes)) {
+            BufferedImage image = ImageIO.read(bis);
+            if (image == null) {
+                throw new IOException("Unsupported image format for PDF embedding");
+            }
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                ImageIO.write(image, "png", baos);
+                return baos.toByteArray();
+            }
+        }
     }
 
-    private String getBaseName(String fileName) {
-        if (fileName == null) return "";
-        int dotIndex = fileName.lastIndexOf('.');
-        return (dotIndex == -1) ? fileName : fileName.substring(0, dotIndex);
+    private boolean isPng(byte[] b) {
+        return b != null && b.length > 8
+                && (b[0] & 0xFF) == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G';
+    }
+
+    private boolean isJpeg(byte[] b) {
+        return b != null && b.length > 3
+                && (b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8;
     }
 }

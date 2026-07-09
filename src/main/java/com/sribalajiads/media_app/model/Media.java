@@ -40,9 +40,17 @@ public class Media {
     @Column(name = "media_type", nullable = false)
     private String mediaType;
 
-    @Column(name = "image_path", nullable = false)
+    @Column(name = "image_path")
     private String imagePath;
+    // ADD these three
+    @Column(name = "image_url")
+    private String imageUrl;
 
+    @Column(name = "public_id")
+    private String publicId;
+
+    @Column(name = "storage_provider")
+    private String storageProvider;
     @Column(name = "location_url")
     private String locationUrl;
 
